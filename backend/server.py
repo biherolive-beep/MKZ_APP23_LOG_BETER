@@ -1,4 +1,5 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -9,7 +10,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 import PyPDF2
 import asyncio
 import aiofiles
@@ -18,9 +19,19 @@ import xlrd
 from docx import Document
 import docx2txt
 from striprtf.striprtf import rtf_to_text
+from passlib.context import CryptContext
+from jose import JWTError, jwt
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+
+# --- Security ---
+SECRET_KEY = os.environ.get("SECRET_KEY", "a_very_secret_key")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/admin/login")
 
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
@@ -32,6 +43,7 @@ app = FastAPI()
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
+admin_router = APIRouter(prefix="/api/admin")
 
 # PDF base path
 DOCUMENT_BASE_PATH = Path("/var/www/html/pdf")
@@ -61,9 +73,65 @@ class IndexedFile(BaseModel):
     file_path: str
     file_name: str
     content: str
-    indexed_at: datetime = Field(default_factory=lambda: datetime.now())
+    created_at: datetime = Field(default_factory=lambda: datetime.now())
+    updated_at: datetime = Field(default_factory=lambda: datetime.now())
 
-# Utility functions
+class RecentFile(BaseModel):
+    file_name: str
+    file_path: str
+    created_at: datetime
+
+class AdminUser(BaseModel):
+    username: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    username: Optional[str] = None
+
+class Settings(BaseModel):
+    site_title: str
+    welcome_message: str
+
+# --- Utility Functions ---
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_current_admin_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        token_data = TokenData(username=username)
+    except JWTError:
+        raise credentials_exception
+
+    # In a real app, you'd look up the user in the DB. Here, we just check the username.
+    if token_data.username != os.environ.get("ADMIN_USERNAME", "admin"):
+        raise credentials_exception
+
+    return AdminUser(username=token_data.username)
+
+
 def get_file_info(file_path: Path) -> Dict[str, Any]:
     """Get file information"""
     try:
@@ -263,38 +331,48 @@ async def serve_document(file_path: str):
 
 @api_router.post("/files/index")
 async def index_documents():
-    """Index all supported document files for content search"""
+    """Index or update all supported document files for content search."""
     try:
         indexed_count = 0
-        
-        # Clear existing index
-        await db.indexed_files.delete_many({})
+        updated_count = 0
         
         # Walk through all supported document files
         for extension in SUPPORTED_EXTENSIONS:
             for doc_path in DOCUMENT_BASE_PATH.rglob(f"*{extension}"):
+                relative_path = str(doc_path.relative_to(DOCUMENT_BASE_PATH))
                 try:
-                    # Extract text content
+                    # Check if the file already exists in the index
+                    existing_file = await db.indexed_files.find_one({"file_path": relative_path})
+
                     content = await extract_document_text(doc_path)
                     
-                    if content:
-                        # Store in database
-                        indexed_file = IndexedFile(
-                            file_path=str(doc_path.relative_to(DOCUMENT_BASE_PATH)),
-                            file_name=doc_path.name,
-                            content=content
+                    if not content:
+                        continue
+
+                    if existing_file:
+                        # Update existing document
+                        await db.indexed_files.update_one(
+                            {"_id": existing_file["_id"]},
+                            {"$set": {"content": content, "updated_at": datetime.now()}}
                         )
-                        
+                        updated_count += 1
+                        logger.info(f"Updated index for: {doc_path.name}")
+                    else:
+                        # Insert new document
+                        indexed_file = IndexedFile(
+                            file_path=relative_path,
+                            file_name=doc_path.name,
+                            content=content,
+                        )
                         await db.indexed_files.insert_one(indexed_file.dict())
                         indexed_count += 1
-                        
-                        logger.info(f"Indexed: {doc_path.name}")
-                        
+                        logger.info(f"Indexed new file: {doc_path.name}")
+
                 except Exception as e:
                     logger.error(f"Error indexing {doc_path}: {e}")
                     continue
                     
-        return {"message": f"Indexed {indexed_count} document files"}
+        return {"message": f"Indexing complete. Indexed: {indexed_count}, Updated: {updated_count}"}
         
     except Exception as e:
         logger.error(f"Error during indexing: {e}")
@@ -358,8 +436,76 @@ async def search_files(q: str, limit: int = 50):
         logger.error(f"Error searching: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Include the router in the main app
+@api_router.get("/files/recent", response_model=List[RecentFile])
+async def get_recent_files(limit: int = 10):
+    """Get the most recently added files."""
+    try:
+        recent_files_cursor = db.indexed_files.find().sort("created_at", -1).limit(limit)
+        recent_files = await recent_files_cursor.to_list(length=limit)
+
+        # Convert to RecentFile model
+        return [
+            RecentFile(
+                file_name=f.get("file_name"),
+                file_path=f.get("file_path"),
+                created_at=f.get("created_at")
+            ) for f in recent_files
+        ]
+    except Exception as e:
+        logger.error(f"Error getting recent files: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- Admin Routes ---
+@admin_router.post("/login", response_model=Token)
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    admin_username = os.environ.get("ADMIN_USERNAME", "admin")
+    admin_password_hash = os.environ.get("ADMIN_PASSWORD_HASH")
+
+    if not admin_password_hash:
+        raise HTTPException(status_code=500, detail="Admin password is not configured.")
+
+    if form_data.username == admin_username and verify_password(form_data.password, admin_password_hash):
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": admin_username}, expires_delta=access_token_expires
+        )
+        return {"access_token": access_token, "token_type": "bearer"}
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Incorrect username or password",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+@api_router.get("/settings", response_model=Settings)
+async def get_settings():
+    """Get site settings."""
+    settings = await db.settings.find_one()
+    if settings:
+        return settings
+    # Return default settings if none are found
+    return Settings(site_title="System Wyszukiwania Dokumentów", welcome_message="Witaj w systemie!")
+
+@admin_router.put("/settings", response_model=Settings)
+async def update_settings(settings: Settings, current_user: AdminUser = Depends(get_current_admin_user)):
+    """Update site settings."""
+    await db.settings.update_one({}, {"$set": settings.dict()}, upsert=True)
+    return settings
+
+# Include the routers in the main app
 app.include_router(api_router)
+app.include_router(admin_router)
+
+@app.on_event("startup")
+async def startup_event():
+    # Create default settings if they don't exist
+    if not await db.settings.count_documents({}):
+        default_settings = Settings(
+            site_title="System Wyszukiwania Dokumentów",
+            welcome_message="Witaj w systemie! Wybierz plik, aby go wyświetlić, lub skorzystaj z wyszukiwarki."
+        )
+        await db.settings.insert_one(default_settings.dict())
+        logger.info("Created default site settings.")
 
 app.add_middleware(
     CORSMiddleware,
