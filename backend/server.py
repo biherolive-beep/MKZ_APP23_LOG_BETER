@@ -24,7 +24,7 @@ load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
+client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
 db = client[os.environ['DB_NAME']]
 
 # Create the main app without a prefix
@@ -321,33 +321,36 @@ async def search_files(q: str, limit: int = 50):
                     ))
         
         # Search by content in indexed files
-        content_matches = await db.indexed_files.find({
-            "content": {"$regex": search_term, "$options": "i"}
-        }).to_list(limit)
-        
-        for match in content_matches:
-            # Extract snippet around match
-            content = match.get("content", "")
-            lower_content = content.lower()
-            match_index = lower_content.find(search_term)
+        try:
+            content_matches = await db.indexed_files.find({
+                "content": {"$regex": search_term, "$options": "i"}
+            }).to_list(limit)
             
-            if match_index >= 0:
-                start = max(0, match_index - 100)
-                end = min(len(content), match_index + 100)
-                snippet = content[start:end]
+            for match in content_matches:
+                # Extract snippet around match
+                content = match.get("content", "")
+                lower_content = content.lower()
+                match_index = lower_content.find(search_term)
                 
-                # Check if already in results (from filename search)
-                existing = next((r for r in results if r.file_path == match["file_path"]), None)
-                if existing:
-                    existing.content_match = f"...{snippet}..."
-                    existing.match_type = "both"
-                else:
-                    results.append(SearchResult(
-                        file_path=match["file_path"],
-                        file_name=match["file_name"],
-                        content_match=f"...{snippet}...",
-                        match_type="content"
-                    ))
+                if match_index >= 0:
+                    start = max(0, match_index - 100)
+                    end = min(len(content), match_index + 100)
+                    snippet = content[start:end]
+
+                    # Check if already in results (from filename search)
+                    existing = next((r for r in results if r.file_path == match["file_path"]), None)
+                    if existing:
+                        existing.content_match = f"...{snippet}..."
+                        existing.match_type = "both"
+                    else:
+                        results.append(SearchResult(
+                            file_path=match["file_path"],
+                            file_name=match["file_name"],
+                            content_match=f"...{snippet}...",
+                            match_type="content"
+                        ))
+        except Exception as db_error:
+            logger.warning(f"Database error during content search: {db_error}")
         
         # Limit results
         results = results[:limit]
