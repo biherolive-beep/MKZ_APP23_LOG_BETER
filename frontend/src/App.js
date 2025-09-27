@@ -1,14 +1,18 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import './App.css';
+import RecentFiles from './components/RecentFiles';
+import AdminLogin from './components/AdminLogin';
+import AdminPanel from './components/AdminPanel';
+import { BrowserRouter as Router, Routes, Route, Navigate, Link } from 'react-router-dom';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
-const App = () => {
+// Main application component
+const MainLayout = ({ siteTitle, welcomeMessage, handleFileSelect, selectedFile, renderDocumentPreview, getFileIcon }) => {
   const [currentPath, setCurrentPath] = useState('');
   const [fileTree, setFileTree] = useState([]);
-  const [selectedFile, setSelectedFile] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -16,7 +20,6 @@ const App = () => {
   const [loading, setLoading] = useState(false);
   const [expandedFolders, setExpandedFolders] = useState(new Set());
 
-  // Load file tree
   const loadFileTree = useCallback(async (path = '') => {
     setLoading(true);
     try {
@@ -24,103 +27,29 @@ const App = () => {
       setFileTree(response.data.items);
       setCurrentPath(response.data.current_path);
     } catch (error) {
-      console.error('Error loading file tree:', error);
+      console.error('Błąd podczas ładowania drzewa plików:', error);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // Search files
   const searchFiles = useCallback(async (query) => {
     if (!query || query.length < 2) {
       setSearchResults([]);
       return;
     }
-
     setIsSearching(true);
     try {
       const response = await axios.get(`${API}/search?q=${encodeURIComponent(query)}&limit=50`);
       setSearchResults(response.data.results);
     } catch (error) {
-      console.error('Error searching files:', error);
+      console.error('Błąd podczas wyszukiwania plików:', error);
       setSearchResults([]);
     } finally {
       setIsSearching(false);
     }
   }, []);
 
-  // Get file type for preview
-  const getFileType = (fileName) => {
-    const extension = fileName.toLowerCase().split('.').pop();
-    return extension;
-  };
-
-  // Render document preview based on file type
-  const renderDocumentPreview = (selectedFile) => {
-    const fileType = getFileType(selectedFile.name);
-    
-    if (fileType === 'pdf') {
-      return (
-        <div className="pdf-viewer">
-          <iframe
-            src={`${API}/files/serve/${encodeURIComponent(selectedFile.path)}#toolbar=1&navpanes=1&scrollbar=1`}
-            title={selectedFile.name}
-            width="100%"
-            height="100%"
-            frameBorder="0"
-            onLoad={() => console.log('PDF iframe loaded')}
-            onError={() => console.log('PDF iframe error')}
-          />
-          <div className="pdf-fallback">
-            <p>PDF not displaying properly? 
-              <a 
-                href={`${API}/files/serve/${encodeURIComponent(selectedFile.path)}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="pdf-link"
-              >
-                Open PDF in new tab
-              </a>
-            </p>
-          </div>
-        </div>
-      );
-    } else {
-      // For non-PDF files, show download/view options
-      return (
-        <div className="document-viewer">
-          <div className="document-info">
-            <h4>Document Preview</h4>
-            <p>File Type: {fileType.toUpperCase()}</p>
-            <p>This document type cannot be previewed inline.</p>
-          </div>
-          <div className="document-actions">
-            <a 
-              href={`${API}/files/serve/${encodeURIComponent(selectedFile.path)}`}
-              download={selectedFile.name}
-              className="download-button"
-            >
-              📥 Download File
-            </a>
-            <a 
-              href={`${API}/files/serve/${encodeURIComponent(selectedFile.path)}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="view-button"
-              onClick={(e) => {
-                e.preventDefault();
-                window.open(`${API}/files/serve/${encodeURIComponent(selectedFile.path)}`, '_blank', 'noopener,noreferrer');
-              }}
-            >
-              👁️ View in Browser
-            </a>
-          </div>
-        </div>
-      );
-    }
-  };
-
-  // Debounced search
   useEffect(() => {
     const timer = setTimeout(() => {
       if (searchQuery) {
@@ -129,25 +58,22 @@ const App = () => {
         setSearchResults([]);
       }
     }, 300);
-
     return () => clearTimeout(timer);
   }, [searchQuery, searchFiles]);
 
-  // Index PDFs
   const indexPDFs = async () => {
     setIsIndexing(true);
     try {
       await axios.post(`${API}/files/index`);
-      alert('PDF indexing completed! Content search is now available.');
+      alert('Indeksowanie dokumentów zakończone! Wyszukiwanie w treści jest teraz dostępne.');
     } catch (error) {
-      console.error('Error indexing PDFs:', error);
-      alert('Error indexing PDFs. Please check the console.');
+      console.error('Błąd podczas indeksowania dokumentów:', error);
+      alert('Błąd podczas indeksowania dokumentów. Sprawdź konsolę.');
     } finally {
       setIsIndexing(false);
     }
   };
 
-  // Handle folder click
   const handleFolderClick = (folderPath) => {
     if (expandedFolders.has(folderPath)) {
       setExpandedFolders(prev => {
@@ -161,39 +87,6 @@ const App = () => {
     }
   };
 
-  // Get file icon based on extension
-  const getFileIcon = (fileName) => {
-    const extension = fileName.toLowerCase().split('.').pop();
-    const iconMap = {
-      'pdf': '📄',
-      'xlsx': '📊',
-      'xls': '📊', 
-      'docx': '📝',
-      'doc': '📝',
-      'rtf': '📝',
-      'txt': '📃'
-    };
-    return iconMap[extension] || '📄';
-  };
-
-  // Check if file is supported
-  const isSupportedFile = (fileName) => {
-    const extension = fileName.toLowerCase().split('.').pop();
-    return ['pdf', 'xlsx', 'xls', 'docx', 'doc', 'rtf', 'txt'].includes(extension);
-  };
-
-  // Handle file selection
-  const handleFileSelect = (file) => {
-    console.log('File selected:', file);
-    if (file.type === 'file' && isSupportedFile(file.name)) {
-      console.log('Setting selected file:', file);
-      setSelectedFile(file);
-    } else {
-      console.log('File is not supported or is not a file type');
-    }
-  };
-
-  // Load initial file tree
   useEffect(() => {
     loadFileTree();
   }, [loadFileTree]);
@@ -201,14 +94,13 @@ const App = () => {
   const renderFileTree = (items, level = 0) => {
     return items
       .sort((a, b) => {
-        // Folders first, then files
         if (a.type !== b.type) {
           return a.type === 'folder' ? -1 : 1;
         }
         return a.name.localeCompare(b.name);
       })
       .map((item) => (
-        <div key={item.id} className={`file-item level-${level}`}>
+        <div key={item.id || item.path} className={`file-item level-${level}`}>
           <div
             className={`file-item-content ${item.type === 'folder' ? 'folder' : 'file'} ${
               selectedFile?.id === item.id ? 'selected' : ''
@@ -238,25 +130,23 @@ const App = () => {
     return (
       <div className="search-results">
         <div className="search-header">
-          <h3>Search Results ({searchResults.length})</h3>
+          <h3>Wyniki wyszukiwania ({searchResults.length})</h3>
           {isSearching && <div className="loading-spinner">🔍</div>}
         </div>
         {searchResults.length === 0 && !isSearching && searchQuery.length >= 2 && (
-          <div className="no-results">No files found matching "{searchQuery}"</div>
+          <div className="no-results">Nie znaleziono plików pasujących do "{searchQuery}"</div>
         )}
         {searchResults.map((result) => (
           <div
             key={result.id}
             className={`search-result-item ${selectedFile?.path === result.file_path ? 'selected' : ''}`}
             onClick={() => {
-              // Create proper file object for search results
               const fileObj = {
                 id: result.id,
                 name: result.file_name,
                 path: result.file_path,
                 type: 'file'
               };
-              console.log('Selecting file from search:', fileObj);
               handleFileSelect(fileObj);
             }}
           >
@@ -268,8 +158,8 @@ const App = () => {
               </div>
             )}
             <div className="result-type">
-              Match: {result.match_type === 'both' ? 'Filename & Content' : 
-                     result.match_type === 'filename' ? 'Filename' : 'Content'}
+              Dopasowanie: {result.match_type === 'both' ? 'Nazwa pliku i treść' :
+                     result.match_type === 'filename' ? 'Nazwa pliku' : 'Treść'}
             </div>
           </div>
         ))}
@@ -279,16 +169,19 @@ const App = () => {
 
   return (
     <div className="app">
-      {/* Header with Search */}
       <header className="app-header">
         <div className="header-content">
-          <h1 className="app-title">📚 Document Search System</h1>
+          <h1 className="app-title">
+            <Link to="/" style={{ textDecoration: 'none', color: 'inherit' }}>
+              {siteTitle}
+            </Link>
+          </h1>
           <div className="search-container">
             <div className="search-input-wrapper">
               <input
                 type="text"
                 className="search-input"
-                placeholder="Search files by name or content..."
+                placeholder="Szukaj plików po nazwie lub treści..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
@@ -296,7 +189,7 @@ const App = () => {
                 <button 
                   className="search-clear"
                   onClick={() => setSearchQuery('')}
-                  title="Clear search"
+                  title="Wyczyść wyszukiwanie"
                 >
                   ✕
                 </button>
@@ -309,21 +202,19 @@ const App = () => {
             onClick={indexPDFs}
             disabled={isIndexing}
           >
-            {isIndexing ? '⏳ Indexing...' : '🔄 Index Documents'}
+            {isIndexing ? '⏳ Indeksowanie...' : '🔄 Indeksuj Dokumenty'}
           </button>
         </div>
       </header>
 
-      {/* Main Content */}
       <div className="main-content">
-        {/* Left Panel - File Browser */}
         <div className="left-panel">
           <div className="file-browser">
             <div className="browser-header">
-              <h3>📁 File Browser</h3>
+              <h3>📁 Przeglądarka Plików</h3>
               {currentPath && (
                 <div className="current-path">
-                  📍 {currentPath || 'Root'}
+                  📍 {currentPath || 'Główny katalog'}
                 </div>
               )}
               {loading && <div className="loading-spinner">⏳</div>}
@@ -338,7 +229,7 @@ const App = () => {
                     loadFileTree(parentPath);
                   }}
                 >
-                  ⬆️ Back
+                  ⬆️ Wróć
                 </button>
               </div>
             )}
@@ -349,7 +240,6 @@ const App = () => {
           </div>
         </div>
 
-        {/* Middle Panel - Document Preview */}
         <div className="middle-panel">
           {selectedFile ? (
             <div className="pdf-preview">
@@ -362,24 +252,27 @@ const App = () => {
           ) : (
             <div className="no-selection">
               <div className="no-selection-content">
-                <h2>🔍 Document Search System</h2>
-                <p>Select a document file from the left panel or search results to preview it here</p>
+                <h2>{siteTitle}</h2>
+                <p>{welcomeMessage}</p>
+
+                <RecentFiles onFileSelect={handleFileSelect} />
+
                 <div className="instructions">
-                  <h3>How to use:</h3>
+                  <h3>Jak używać:</h3>
                   <ul>
-                    <li>🔍 Use the search bar to find files by name or content</li>
-                    <li>📁 Click folders on the left to expand them</li>
-                    <li>📄 Click document files to preview them here</li>
-                    <li>🔄 Click "Index Documents" to enable content search</li>
+                    <li>🔍 Użyj paska wyszukiwania, aby znaleźć pliki po nazwie lub treści</li>
+                    <li>📁 Klikaj na foldery po lewej stronie, aby je rozwinąć</li>
+                    <li>📄 Klikaj na pliki, aby zobaczyć ich podgląd</li>
+                    <li>🔄 Kliknij "Indeksuj Dokumenty", aby włączyć wyszukiwanie w treści</li>
                   </ul>
                   <div className="supported-formats">
-                    <h4>Supported formats:</h4>
+                    <h4>Wspierane formaty:</h4>
                     <div className="format-list">
                       <span>📄 PDF</span>
                       <span>📊 Excel (xlsx, xls)</span>
                       <span>📝 Word (docx, doc)</span>
                       <span>📝 RTF</span>
-                      <span>📃 Text files</span>
+                      <span>📃 Pliki tekstowe</span>
                     </div>
                   </div>
                 </div>
@@ -388,20 +281,19 @@ const App = () => {
           )}
         </div>
 
-        {/* Right Panel - Search Results */}
         <div className="right-panel">
           {searchQuery ? renderSearchResults() : (
             <div className="search-placeholder">
               <div className="search-placeholder-content">
-                <h3>🔍 Search Results</h3>
-                <p>Start typing in the search bar to find documents</p>
+                <h3>🔍 Wyniki wyszukiwania</h3>
+                <p>Zacznij pisać w pasku wyszukiwania, aby znaleźć dokumenty</p>
                 <div className="search-tips">
-                  <h4>Search Tips:</h4>
+                  <h4>Wskazówki:</h4>
                   <ul>
-                    <li>Search by filename: "project", "financial"</li>
-                    <li>Search by content: "machine learning", "policy"</li>
-                    <li>Minimum 2 characters required</li>
-                    <li>Results show both filename and content matches</li>
+                    <li>Wyszukuj po nazwie pliku: "projekt", "finansowy"</li>
+                    <li>Wyszukuj po treści: "uczenie maszynowe", "polityka"</li>
+                    <li>Wymagane minimum 2 znaki</li>
+                    <li>Wyniki pokazują dopasowania w nazwie i treści pliku</li>
                   </ul>
                 </div>
               </div>
@@ -410,6 +302,127 @@ const App = () => {
         </div>
       </div>
     </div>
+  );
+};
+
+
+const App = () => {
+  const [authToken, setAuthToken] = useState(localStorage.getItem('authToken'));
+  const [siteTitle, setSiteTitle] = useState('Ładowanie...');
+  const [welcomeMessage, setWelcomeMessage] = useState('');
+  const [selectedFile, setSelectedFile] = useState(null);
+
+  useEffect(() => {
+    const fetchSettings = async () => {
+        try {
+            const response = await axios.get(`${API}/settings`);
+            setSiteTitle(`📚 ${response.data.site_title}`);
+            setWelcomeMessage(response.data.welcome_message);
+        } catch (error) {
+            console.error('Nie można pobrać ustawień:', error);
+            setSiteTitle('📚 System Wyszukiwania Dokumentów');
+            setWelcomeMessage('Wystąpił błąd podczas ładowania ustawień.');
+        }
+    };
+    fetchSettings();
+  }, [authToken]);
+
+  const getFileType = (fileName) => {
+    const extension = fileName.toLowerCase().split('.').pop();
+    return extension;
+  };
+
+  const getFileIcon = (fileName) => {
+    const extension = fileName.toLowerCase().split('.').pop();
+    const iconMap = {
+      'pdf': '📄', 'xlsx': '📊', 'xls': '📊', 'docx': '📝', 'doc': '📝', 'rtf': '📝', 'txt': '📃'
+    };
+    return iconMap[extension] || '📄';
+  };
+
+  const isSupportedFile = (fileName) => {
+    const extension = fileName.toLowerCase().split('.').pop();
+    return ['pdf', 'xlsx', 'xls', 'docx', 'doc', 'rtf', 'txt'].includes(extension);
+  };
+
+  const handleFileSelect = (file) => {
+    if (file.type === 'file' && isSupportedFile(file.name)) {
+      setSelectedFile(file);
+    }
+  };
+
+  const renderDocumentPreview = (file) => {
+    const fileType = getFileType(file.name);
+
+    if (fileType === 'pdf') {
+      return (
+        <div className="pdf-viewer">
+          <iframe
+            src={`${API}/files/serve/${encodeURIComponent(file.path)}#toolbar=1&navpanes=1&scrollbar=1`}
+            title={file.name}
+            width="100%"
+            height="100%"
+            frameBorder="0"
+          />
+          <div className="pdf-fallback">
+            <p>Nie można wyświetlić pliku PDF?
+              <a href={`${API}/files/serve/${encodeURIComponent(file.path)}`} target="_blank" rel="noopener noreferrer" className="pdf-link">
+                Otwórz PDF w nowej karcie
+              </a>
+            </p>
+          </div>
+        </div>
+      );
+    } else {
+      return (
+        <div className="document-viewer">
+          <div className="document-info">
+            <h4>Podgląd dokumentu</h4>
+            <p>Typ pliku: {fileType.toUpperCase()}</p>
+            <p>Ten typ dokumentu nie może być wyświetlany w podglądzie.</p>
+          </div>
+          <div className="document-actions">
+            <a href={`${API}/files/serve/${encodeURIComponent(file.path)}`} download={file.name} className="download-button">
+              📥 Pobierz plik
+            </a>
+            <a href={`${API}/files/serve/${encodeURIComponent(file.path)}`} target="_blank" rel="noopener noreferrer" className="view-button">
+              👁️ Otwórz w przeglądarce
+            </a>
+          </div>
+        </div>
+      );
+    }
+  };
+
+  return (
+    <Router>
+        <Routes>
+            <Route
+                path="/"
+                element={
+                    <MainLayout
+                        siteTitle={siteTitle}
+                        welcomeMessage={welcomeMessage}
+                        handleFileSelect={handleFileSelect}
+                        selectedFile={selectedFile}
+                        renderDocumentPreview={renderDocumentPreview}
+                        getFileIcon={getFileIcon}
+                    />
+                }
+            />
+            <Route path="/login" element={<AdminLogin setAuthToken={setAuthToken} />} />
+            <Route
+                path="/admin"
+                element={
+                    authToken ? (
+                        <AdminPanel authToken={authToken} setAuthToken={setAuthToken} />
+                    ) : (
+                        <Navigate to="/login" />
+                    )
+                }
+            />
+        </Routes>
+    </Router>
   );
 };
 
