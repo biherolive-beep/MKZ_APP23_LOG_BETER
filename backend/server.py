@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
@@ -95,7 +95,29 @@ class Settings(BaseModel):
     site_title: str
     welcome_message: str
 
+class AuditLog(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    ip_address: Optional[str] = None
+    username: str
+    action: str
+    details: Dict[str, Any]
+
 # --- Utility Functions ---
+
+async def log_change(request: Request, username: str, action: str, details: Dict[str, Any]):
+    """Helper function to log an audit event."""
+    try:
+        ip_address = request.client.host if request else "N/A"
+        log_entry = AuditLog(
+            username=username,
+            ip_address=ip_address,
+            action=action,
+            details=details
+        )
+        await db.audit_logs.insert_one(log_entry.dict())
+    except Exception as e:
+        logger.error(f"Failed to log change: {e}")
 
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -329,10 +351,18 @@ async def serve_document(file_path: str):
         logger.error(f"Error serving file {file_path}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@api_router.post("/files/index")
-async def index_documents():
+@admin_router.post("/files/index")
+async def index_documents(request: Request, current_user: AdminUser = Depends(get_current_admin_user)):
     """Index or update all supported document files for content search."""
     try:
+        # Log the action
+        await log_change(
+            request=request,
+            username=current_user.username,
+            action="Trigger Re-indexing",
+            details={}
+        )
+
         indexed_count = 0
         updated_count = 0
         
@@ -487,10 +517,31 @@ async def get_settings():
     return Settings(site_title="System Wyszukiwania Dokumentów", welcome_message="Witaj w systemie!")
 
 @admin_router.put("/settings", response_model=Settings)
-async def update_settings(settings: Settings, current_user: AdminUser = Depends(get_current_admin_user)):
+async def update_settings(request: Request, settings: Settings, current_user: AdminUser = Depends(get_current_admin_user)):
     """Update site settings."""
-    await db.settings.update_one({}, {"$set": settings.dict()}, upsert=True)
-    return settings
+    try:
+        # Get old settings for logging comparison
+        old_settings = await db.settings.find_one()
+        if old_settings:
+            # Clean up the _id field for comparison
+            old_settings.pop('_id', None)
+
+        await db.settings.update_one({}, {"$set": settings.dict()}, upsert=True)
+
+        # Log the change
+        await log_change(
+            request=request,
+            username=current_user.username,
+            action="Update Settings",
+            details={
+                "old_settings": old_settings or "No previous settings",
+                "new_settings": settings.dict()
+            }
+        )
+        return settings
+    except Exception as e:
+        logger.error(f"Error updating settings: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update settings.")
 
 # Include the routers in the main app
 app.include_router(api_router)
