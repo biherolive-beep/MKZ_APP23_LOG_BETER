@@ -146,3 +146,143 @@ Po zalogowaniu zostaniesz przekierowany do panelu (`/admin`), gdzie możesz:
 - Wylogować się.
 
 Zmiany są zapisywane i od razu widoczne na stronie głównej.
+
+---
+
+## Wdrożenie na serwerze Debian z Apache (Produkcja)
+
+Poniższa instrukcja przeprowadzi Cię przez proces wdrożenia aplikacji w środowisku produkcyjnym na serwerze Debian. Użyjemy `systemd` do zarządzania procesem backendu oraz Apache jako reverse proxy do serwowania aplikacji.
+
+### 1. Wymagania na serwerze
+
+Upewnij się, że na serwerze są zainstalowane następujące pakiety:
+
+```bash
+sudo apt update
+sudo apt install apache2 python3-venv python3-pip nodejs npm
+```
+
+Włącz niezbędne moduły Apache:
+```bash
+sudo a2enmod proxy
+sudo a2enmod proxy_http
+sudo a2enmod rewrite
+sudo systemctl restart apache2
+```
+
+### 2. Przygotowanie Aplikacji
+
+**a) Sklonuj repozytorium i zainstaluj zależności:**
+
+Postępuj zgodnie z krokami z sekcji **Instalacja i Konfiguracja**, aby sklonować repozytorium i zainstalować wszystkie zależności dla backendu i frontendu.
+
+**b) Zbuduj frontend do wersji produkcyjnej:**
+
+Przejdź do katalogu `frontend/` i uruchom:
+
+```bash
+npm run build
+```
+To polecenie utworzy katalog `build/` z gotowymi do wdrożenia plikami statycznymi.
+
+**c) Skonfiguruj pliki `.env` dla produkcji:**
+
+- **`frontend/.env`**: Zmienna `REACT_APP_BACKEND_URL` powinna być pusta, aby zapytania do API były wysyłane na ten sam host, z którego serwowany jest frontend.
+  ```env
+  REACT_APP_BACKEND_URL=
+  ```
+
+- **`backend/.env`**: Ustaw `CORS_ORIGINS` na domenę, pod którą będzie dostępna aplikacja (np. `http://twoja-domena.com`).
+
+### 3. Skonfiguruj i uruchom Backend jako usługę `systemd`
+
+Utworzenie usługi systemowej zapewni, że backend będzie działał w tle i automatycznie uruchamiał się po restarcie serwera.
+
+**a) Utwórz plik usługi:**
+
+```bash
+sudo nano /etc/systemd/system/document-search-backend.service
+```
+
+**b) Wklej poniższą konfigurację:**
+
+Zastąp `<uzytkownik>`, `<grupa>` oraz ścieżki do Twojego projektu.
+
+```ini
+[Unit]
+Description=Document Search Backend Service
+After=network.target
+
+[Service]
+User=<uzytkownik>
+Group=<grupa>
+WorkingDirectory=/sciezka/do/twojego/projektu/backend
+ExecStart=/sciezka/do/twojego/projektu/venv/bin/uvicorn server:app --host 127.0.0.1 --port 8000
+Restart=always
+EnvironmentFile=/sciezka/do/twojego/projektu/backend/.env
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**c) Uruchom i włącz usługę:**
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start document-search-backend
+sudo systemctl enable document-search-backend
+```
+
+Aby sprawdzić status usługi, użyj: `sudo systemctl status document-search-backend`.
+
+### 4. Skonfiguruj Apache jako Reverse Proxy
+
+**a) Utwórz plik konfiguracyjny dla nowej strony w Apache:**
+
+```bash
+sudo nano /etc/apache2/sites-available/document-search.conf
+```
+
+**b) Wklej poniższą konfigurację:**
+
+Zastąp `twoja-domena.com` oraz ścieżki do Twojego projektu.
+
+```apache
+<VirtualHost *:80>
+    ServerName twoja-domena.com
+
+    # Ścieżka do zbudowanego frontendu
+    DocumentRoot /sciezka/do/twojego/projektu/frontend/build
+
+    # Konfiguracja proxy dla API backendu
+    ProxyPreserveHost On
+    ProxyPass /api/ http://127.0.0.1:8000/api/
+    ProxyPassReverse /api/ http://127.0.0.1:8000/api/
+
+    # Umożliwia React Routerowi obsługę routingu po stronie klienta
+    <Directory /sciezka/do/twojego/projektu/frontend/build>
+        Options Indexes FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    RewriteEngine On
+    RewriteCond %{DOCUMENT_ROOT}%{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{DOCUMENT_ROOT}%{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+    RewriteRule ^ /index.html [L]
+
+    ErrorLog ${APACHE_LOG_DIR}/document-search-error.log
+    CustomLog ${APACHE_LOG_DIR}/document-search-access.log combined
+</VirtualHost>
+```
+
+**c) Włącz nową konfigurację i zrestartuj Apache:**
+
+```bash
+sudo a2ensite document-search.conf
+sudo a2dissite 000-default.conf  # Wyłączenie domyślnej strony
+sudo systemctl restart apache2
+```
+
+Twoja aplikacja powinna być teraz dostępna pod adresem `http://twoja-domena.com`.
